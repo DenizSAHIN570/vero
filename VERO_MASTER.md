@@ -18,12 +18,16 @@
    - [Speech Pipeline](#63-speech-pipeline)
    - [Native Bridge (Kotlin)](#64-native-bridge-kotlin)
    - [Assistant Brain](#65-assistant-brain)
+   - [Memory & Persistence](#66-memory--persistence)
+   - [Notification Reader](#67-notification-reader)
+   - [Default Assistant Integration](#68-default-assistant-integration)
 7. [Android Permissions & Requirements](#7-android-permissions--requirements)
 8. [The System Prompt Strategy](#8-the-system-prompt-strategy)
 9. [MVP Roadmap](#9-mvp-roadmap)
 10. [Known Limitations & Challenges](#10-known-limitations--challenges)
 11. [Open Source Strategy](#11-open-source-strategy)
 12. [Future Features (Post-MVP)](#12-future-features-post-mvp)
+13. [Project Info](#13-project-info)
 
 ---
 
@@ -33,19 +37,26 @@ Vero is a **fully open source, privacy-respecting, LLM-powered voice assistant f
 
 - **Pluggable** — users choose their own AI backend (Claude, GPT-4, Gemini, local models, etc.)
 - **Open** — every skill, every provider, every native bridge is transparent and community-extensible
-- **Capable** — real device control, wake word detection, app launching, and natural conversation
+- **Capable** — real device control, wake word detection, app launching, notification reading, and natural conversation
+- **Persistent** — remembers context across sessions via local conversation memory
 - **Private** — no data sent anywhere except to the AI provider the user explicitly configures
 
 ### Core Capabilities (MVP)
 
-- Wake word detection (always-on, low power)
+- Wake word detection (always-on, low power) — moved to Phase 2
 - Natural language voice input via speech-to-text
 - LLM-powered response and command parsing
+- Multi-action commands (execute multiple skills in a single utterance)
 - Device control: volume, brightness, Do Not Disturb
 - Launch and interact with third-party apps via Intents
-- Text-to-speech response output
+- Notification reading via NotificationListenerService
+- Text-to-speech response output with proper status sync
+- Persistent conversation memory across sessions (local SQLite)
+- Default assistant integration (responds to home button long-press)
 - Persistent background service
-- Settings UI for provider config and API keys
+- Graceful error recovery with spoken fallback responses
+- Settings UI for provider config, API keys, and model selection
+- Light and dark theme
 
 ---
 
@@ -60,7 +71,7 @@ Vero is a **fully open source, privacy-respecting, LLM-powered voice assistant f
 | **Perplexity Assistant** | Closest commercial rival, but closed source and not pluggable |
 | **Alexa on Android** | Has device control and skills, but closed, tied to Amazon |
 
-**The gap:** No mature, open source, Flutter-based, LLM-pluggable Android assistant with real device control exists. Vero fills it.
+**The gap:** No mature, open source, Flutter-based, LLM-pluggable Android assistant with real device control, persistent memory, and notification awareness exists. Vero fills it.
 
 ---
 
@@ -79,6 +90,7 @@ Vero is a **fully open source, privacy-respecting, LLM-powered voice assistant f
 | Launch apps / intents | `android_intent_plus` + `url_launcher` |
 | HTTP / API calls | `dio` |
 | Local storage (API keys, settings) | `flutter_secure_storage` |
+| Conversation memory (persistent) | `sqflite` |
 | State management | `riverpod` |
 | Permissions | `permission_handler` |
 | Notifications | `flutter_local_notifications` |
@@ -90,9 +102,11 @@ Vero is a **fully open source, privacy-respecting, LLM-powered voice assistant f
 | Persistent background | `ForegroundService` with ongoing notification |
 | Device control bridge | `MethodChannel` → `AudioManager`, `Settings.System` |
 | Wake word detection | Picovoice native SDK via Flutter plugin |
-| Accessibility service | Custom `AccessibilityService` subclass (optional, for advanced control) |
+| Notification reading | `NotificationListenerService` subclass |
+| Default assistant | Handle `android.intent.action.ASSIST` intent in `MainActivity` |
 | App launching | `Intent` + `PackageManager` |
 | Battery optimization bypass | Guided user flow to whitelist app |
+| Boot auto-start | `BroadcastReceiver` for `BOOT_COMPLETED` |
 
 ### AI Providers (Pluggable)
 
@@ -120,7 +134,7 @@ Vero is a **fully open source, privacy-respecting, LLM-powered voice assistant f
 ### High-Level Flow
 
 ```
-User speaks
+User speaks "Hey Vero..."
      │
      ▼
 ┌─────────────────────────┐
@@ -130,29 +144,51 @@ User speaks
              │ wake word detected
              ▼
 ┌─────────────────────────┐
-│   Speech-to-Text (STT)  │  ← Android SpeechRecognizer or Whisper
+│   Speech-to-Text (STT)  │  ← Android SpeechRecognizer
 └────────────┬────────────┘
              │ transcript string
              ▼
 ┌─────────────────────────┐
 │    AssistantBrain       │  ← orchestrates everything
+│  - loads memory         │
 │  - injects system prompt│
 │  - manages history      │
 │  - calls AI provider    │
+│  - persists memory      │
 └────────────┬────────────┘
-             │ AssistantResponse (speech + optional skill)
+             │ AssistantResponse (speech + actions[])
              ▼
      ┌───────┴────────┐
      │                │
      ▼                ▼
-┌─────────┐    ┌─────────────┐
-│   TTS   │    │ Skill Router│  ← executes device command
-│ speaks  │    │             │
-│response │    │ VolumeSkill │
-└─────────┘    │ BrightnessSkill│
-               │ LaunchAppSkill │
-               └─────────────┘
+┌─────────┐    ┌──────────────────┐
+│   TTS   │    │   Skill Router   │  ← executes all actions in sequence
+│ speaks  │    │                  │
+│response │    │ VolumeSkill      │
+└─────────┘    │ BrightnessSkill  │
+               │ LaunchAppSkill   │
+               │ DndSkill         │
+               │ NotificationSkill│
+               └──────────────────┘
 ```
+
+### Multi-Action Response Schema
+
+The response schema supports an array of actions, enabling commands like
+"turn off DND, set brightness to 80, and open YouTube" in a single utterance:
+
+```json
+{
+  "speech": "Sure, DND off, brightness at 80, opening YouTube.",
+  "actions": [
+    { "skill": "set_do_not_disturb", "args": { "enabled": false } },
+    { "skill": "set_brightness",     "args": { "level": 80 } },
+    { "skill": "launch_app",         "args": { "package": "com.google.android.youtube" } }
+  ]
+}
+```
+
+Single-action commands use a one-element array. `"actions": []` means conversation only.
 
 ### Provider Abstraction
 
@@ -174,10 +210,11 @@ AssistantProvider (abstract interface)
 ```
 SkillRegistry (Map<String, Skill>)
       │
-      ├── VolumeSkill       → DeviceControlChannel (Kotlin)
-      ├── BrightnessSkill   → DeviceControlChannel (Kotlin)
-      ├── LaunchAppSkill    → AppLauncherChannel (Kotlin)
-      ├── DoNotDisturbSkill → NotificationManager
+      ├── VolumeSkill        → DeviceControlChannel (Kotlin)
+      ├── BrightnessSkill    → DeviceControlChannel (Kotlin)
+      ├── LaunchAppSkill     → AppLauncherChannel (Kotlin)
+      ├── DoNotDisturbSkill  → DeviceControlChannel (Kotlin)
+      ├── ReadNotifSkill     → NotificationChannel (Kotlin)
       └── [community skills]
 ```
 
@@ -191,76 +228,86 @@ Vero/
 │   ├── core/
 │   │   ├── ai/
 │   │   │   ├── assistant_provider.dart        # abstract interface + models
-│   │   │   ├── claude_provider.dart           # Anthropic implementation
-│   │   │   ├── openai_provider.dart           # OpenAI implementation
-│   │   │   ├── gemini_provider.dart           # Google Gemini implementation
-│   │   │   ├── ollama_provider.dart           # local Ollama implementation
-│   │   │   └── provider_registry.dart         # factory + provider map
+│   │   │   ├── claude_provider.dart
+│   │   │   ├── openai_provider.dart
+│   │   │   ├── gemini_provider.dart
+│   │   │   ├── ollama_provider.dart
+│   │   │   ├── provider_registry.dart
+│   │   │   └── response_parser.dart
 │   │   │
 │   │   ├── skills/
 │   │   │   ├── skill.dart                     # abstract Skill interface
+│   │   │   ├── skill_registry.dart
 │   │   │   ├── volume_skill.dart
 │   │   │   ├── brightness_skill.dart
+│   │   │   ├── dnd_skill.dart
 │   │   │   ├── launch_app_skill.dart
-│   │   │   ├── dnd_skill.dart                 # Do Not Disturb
-│   │   │   └── skill_registry.dart            # registers all skills
+│   │   │   ├── read_notifications_skill.dart
+│   │   │   └── app_index.dart                 # fuzzy app name resolver
+│   │   │
+│   │   ├── memory/
+│   │   │   ├── memory_store.dart              # SQLite persistence
+│   │   │   └── conversation_summary.dart      # summarization strategy
 │   │   │
 │   │   ├── speech/
-│   │   │   ├── stt_service.dart               # speech-to-text abstraction
-│   │   │   └── tts_service.dart               # text-to-speech abstraction
+│   │   │   ├── stt_service.dart
+│   │   │   └── tts_service.dart               # includes speakAndWait()
 │   │   │
 │   │   ├── channels/
-│   │   │   ├── device_control_channel.dart    # Dart side of MethodChannel
-│   │   │   └── app_launcher_channel.dart      # Dart side of MethodChannel
+│   │   │   ├── device_control_channel.dart
+│   │   │   ├── app_launcher_channel.dart
+│   │   │   ├── notification_channel.dart      # Dart side of NotificationListener
+│   │   │   └── service_channel.dart           # start/stop ForegroundService
 │   │   │
 │   │   └── assistant_brain.dart               # main orchestrator
 │   │
 │   ├── features/
 │   │   ├── chat/
-│   │   │   ├── chat_screen.dart               # main conversation UI
+│   │   │   ├── chat_screen.dart
 │   │   │   ├── chat_bubble.dart
-│   │   │   └── chat_notifier.dart             # Riverpod state
+│   │   │   └── chat_notifier.dart
 │   │   │
 │   │   ├── settings/
 │   │   │   ├── settings_screen.dart
-│   │   │   ├── provider_settings.dart         # API key entry, model select
+│   │   │   ├── provider_settings.dart         # model selector
 │   │   │   └── wake_word_settings.dart
 │   │   │
 │   │   └── onboarding/
 │   │       ├── onboarding_screen.dart
-│   │       └── permissions_flow.dart          # request all required permissions
+│   │       └── permissions_flow.dart
 │   │
 │   ├── shared/
 │   │   ├── models/
 │   │   │   ├── message.dart
-│   │   │   └── assistant_response.dart
+│   │   │   └── assistant_response.dart        # updated for actions[]
 │   │   ├── theme/
-│   │   │   └── app_theme.dart
+│   │   │   └── app_theme.dart                 # dark + light themes
 │   │   └── constants.dart
 │   │
 │   └── main.dart
 │
 ├── android/
 │   └── app/src/main/
-│       ├── kotlin/com/Vero/assistant/
-│       │   ├── MainActivity.kt
-│       │   ├── VeroForegroundService.kt       # persistent background service
-│       │   ├── DeviceControlChannel.kt        # volume, brightness, DND
-│       │   ├── AppLauncherChannel.kt          # intent-based app launching
-│       │   └── WakeWordChannel.kt             # wake word bridge (if needed)
+│       ├── kotlin/com/vero/assistant/
+│       │   ├── MainActivity.kt                # handles ASSIST intent
+│       │   ├── VeroForegroundService.kt
+│       │   ├── DeviceControlChannel.kt
+│       │   ├── AppLauncherChannel.kt
+│       │   ├── NotificationListenerService.kt
+│       │   ├── WakeWordChannel.kt             # Phase 3
+│       │   └── BootReceiver.kt
 │       │
-│       └── res/
-│           └── drawable/
-│               └── ic_notification.xml        # required for ForegroundService
+│       └── res/drawable/
+│           └── ic_notification.xml
 │
 ├── docs/
-│   ├── SKILL_GUIDE.md                         # how to write a community skill
-│   ├── PROVIDER_GUIDE.md                      # how to add a new AI provider
-│   └── SETUP.md                               # first-time dev setup
+│   ├── SKILL_GUIDE.md
+│   ├── PROVIDER_GUIDE.md
+│   └── SETUP.md
 │
 ├── pubspec.yaml
 ├── README.md
-└── Vero_MASTER.md                             # this document
+└── VERO_MASTER.md
 ```
 
 ---
@@ -269,93 +316,22 @@ Vero/
 
 ### 6.1 AI Provider Layer
 
-The provider interface is the foundation of Vero's pluggability. Every AI backend implements the same contract.
+The provider interface is the foundation of Vero's pluggability. Every AI backend implements the same contract. See existing `lib/core/ai/` files for full implementations.
 
 ```dart
-// lib/core/ai/assistant_provider.dart
-
 abstract class AssistantProvider {
-  String get name;           // e.g. "Claude (Anthropic)"
-  String get modelId;        // e.g. "claude-opus-4-5-20251101"
+  String get name;
+  String get modelId;
 
-  /// Single-shot request
   Future<AssistantResponse> send({
     required List<Message> history,
     required String systemPrompt,
   });
 
-  /// Streaming request (for real-time UI)
   Stream<String> stream({
     required List<Message> history,
     required String systemPrompt,
   });
-}
-
-class AssistantResponse {
-  final String speech;                    // what TTS speaks aloud
-  final String? skillId;                  // skill to execute, or null
-  final Map<String, dynamic>? skillArgs;  // arguments for the skill
-  final String rawText;                   // full response for chat UI
-
-  const AssistantResponse({
-    required this.speech,
-    required this.rawText,
-    this.skillId,
-    this.skillArgs,
-  });
-
-  factory AssistantResponse.fromJson(Map<String, dynamic> json) {
-    return AssistantResponse(
-      speech: json['speech'] as String,
-      skillId: json['skill'] as String?,
-      skillArgs: json['args'] as Map<String, dynamic>?,
-      rawText: jsonEncode(json),
-    );
-  }
-}
-```
-
-**Claude Implementation example:**
-
-```dart
-// lib/core/ai/claude_provider.dart
-
-class ClaudeProvider implements AssistantProvider {
-  final String apiKey;
-  final Dio _dio;
-
-  ClaudeProvider({required this.apiKey}) : _dio = Dio();
-
-  @override
-  String get name => 'Claude (Anthropic)';
-
-  @override
-  String get modelId => 'claude-opus-4-5-20251101';
-
-  @override
-  Future<AssistantResponse> send({
-    required List<Message> history,
-    required String systemPrompt,
-  }) async {
-    final response = await _dio.post(
-      'https://api.anthropic.com/v1/messages',
-      options: Options(headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      }),
-      data: {
-        'model': modelId,
-        'max_tokens': 1024,
-        'system': systemPrompt,
-        'messages': history.map((m) => m.toJson()).toList(),
-      },
-    );
-
-    final text = response.data['content'][0]['text'] as String;
-    final json = jsonDecode(text) as Map<String, dynamic>;
-    return AssistantResponse.fromJson(json);
-  }
 }
 ```
 
@@ -363,284 +339,192 @@ class ClaudeProvider implements AssistantProvider {
 
 ### 6.2 Skill System
 
-Skills are discrete, testable units of device capability. New skills can be contributed by the community without touching the core.
+Skills are discrete, testable units of device capability. The system now supports **multi-action responses** — the LLM can return an array of actions, all of which are executed sequentially.
 
 ```dart
-// lib/core/skills/skill.dart
-
-abstract class Skill {
-  String get id;           // unique key, e.g. "set_volume"
-  String get description;  // used in system prompt to describe capability
-  Map<String, String> get argDescriptions; // arg name → description
-
-  Future<SkillResult> execute(Map<String, dynamic> args);
+// Updated AssistantResponse model
+class AssistantResponse {
+  final String speech;
+  final List<SkillAction> actions;   // replaces single skillId/skillArgs
+  final String rawText;
 }
 
-class SkillResult {
-  final bool success;
-  final String? message; // optional override for TTS confirmation
-
-  const SkillResult({required this.success, this.message});
+class SkillAction {
+  final String skillId;
+  final Map<String, dynamic> args;
 }
 ```
 
-**Volume Skill:**
+The `AssistantBrain` executes all actions in order before speaking:
 
 ```dart
-// lib/core/skills/volume_skill.dart
-
-class VolumeSkill implements Skill {
-  @override
-  String get id => 'set_volume';
-
-  @override
-  String get description => 'Sets the device media volume';
-
-  @override
-  Map<String, String> get argDescriptions => {
-    'level': 'Integer 0–100 representing volume percentage',
-  };
-
-  @override
-  Future<SkillResult> execute(Map<String, dynamic> args) async {
-    final level = (args['level'] as num).toInt().clamp(0, 100);
-    await VolumeController().setVolume(level / 100);
-    return SkillResult(success: true);
+for (final action in response.actions) {
+  final skill = skillRegistry.find(action.skillId);
+  if (skill != null) {
+    final result = await skill.execute(action.args);
+    if (result.message != null) overrideSpeech = result.message;
   }
 }
-```
-
-**Skill Registry builds the system prompt dynamically:**
-
-```dart
-// lib/core/skills/skill_registry.dart
-
-class SkillRegistry {
-  final Map<String, Skill> _skills = {};
-
-  void register(Skill skill) => _skills[skill.id] = skill;
-
-  Skill? find(String id) => _skills[id];
-
-  /// Generates the "Available skills" section of the system prompt
-  String buildSkillManifest() {
-    return _skills.values.map((s) {
-      final args = s.argDescriptions.entries
-          .map((e) => '  - ${e.key}: ${e.value}')
-          .join('\n');
-      return '- ${s.id}: ${s.description}\n$args';
-    }).join('\n\n');
-  }
-}
+await tts.speakAndWait(overrideSpeech ?? response.speech);
 ```
 
 ---
 
 ### 6.3 Speech Pipeline
 
+**TtsService** exposes `speakAndWait()` which completes only after TTS finishes, enabling proper `ChatStatus` sync:
+
 ```dart
-// lib/core/speech/stt_service.dart
-
-class SttService {
-  final SpeechToText _stt = SpeechToText();
-
-  Future<bool> initialize() => _stt.initialize();
-
-  Stream<String> listen() async* {
-    final controller = StreamController<String>();
-
-    await _stt.listen(
-      onResult: (result) {
-        if (result.finalResult) {
-          controller.add(result.recognizedWords);
-        }
-      },
-      listenFor: const Duration(seconds: 30),
-      pauseFor: const Duration(seconds: 3),
-    );
-
-    yield* controller.stream;
-  }
-
-  Future<void> stop() => _stt.stop();
+Future<void> speakAndWait(String text) async {
+  final completer = Completer<void>();
+  _tts.setCompletionHandler(() => completer.complete());
+  await _tts.speak(text);
+  await completer.future;
 }
 ```
 
-```dart
-// lib/core/speech/tts_service.dart
-
-class TtsService {
-  final FlutterTts _tts = FlutterTts();
-
-  Future<void> initialize() async {
-    await _tts.setLanguage('en-US');
-    await _tts.setSpeechRate(0.5);
-    await _tts.setVolume(1.0);
-    await _tts.setPitch(1.0);
-  }
-
-  Future<void> speak(String text) => _tts.speak(text);
-  Future<void> stop() => _tts.stop();
-}
-```
+**SttService** is unchanged — stream-based, returns final transcription results.
 
 ---
 
 ### 6.4 Native Bridge (Kotlin)
 
-**VeroForegroundService.kt** — keeps the app alive:
+**VeroForegroundService** — persistent background service with `START_STICKY`.
+
+**DeviceControlChannel** — volume, brightness, DND via `MethodChannel("vero/device_control")`.
+
+**AppLauncherChannel** — app launching + installed app list via `MethodChannel("vero/app_launcher")`.
+
+**NotificationListenerService** — reads active notifications and exposes them to Flutter via `MethodChannel("vero/notifications")`:
 
 ```kotlin
-class VeroForegroundService : Service() {
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Vero is listening")
-            .setContentText("Say your wake word to activate")
-            .setSmallIcon(R.drawable.ic_notification)
-            .build()
-
-        startForeground(NOTIFICATION_ID, notification)
-        return START_STICKY // restart if killed
+class VeroNotificationListener : NotificationListenerService() {
+  fun getActiveNotifications(): List<Map<String, String>> {
+    return activeNotifications.map { sbn ->
+      mapOf(
+        "app"   to sbn.packageName,
+        "title" to (sbn.notification.extras.getString("android.title") ?: ""),
+        "text"  to (sbn.notification.extras.getString("android.text") ?: ""),
+        "time"  to sbn.postTime.toString()
+      )
     }
-
-    override fun onBind(intent: Intent?): IBinder? = null
+  }
 }
 ```
 
-**DeviceControlChannel.kt:**
+**MainActivity** — handles `android.intent.action.ASSIST` intent so Vero responds to the home button long-press when set as default assistant:
 
 ```kotlin
-class DeviceControlChannel(private val context: Context) {
-
-    fun register(binaryMessenger: BinaryMessenger) {
-        MethodChannel(binaryMessenger, "Vero/device_control")
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "setVolume" -> {
-                        val level = call.argument<Int>("level") ?: 0
-                        setVolume(level)
-                        result.success(null)
-                    }
-                    "setBrightness" -> {
-                        val level = call.argument<Int>("level") ?: 50
-                        setBrightness(level)
-                        result.success(null)
-                    }
-                    "setDoNotDisturb" -> {
-                        val enabled = call.argument<Boolean>("enabled") ?: false
-                        setDoNotDisturb(enabled)
-                        result.success(null)
-                    }
-                    else -> result.notImplemented()
-                }
-            }
-    }
-
-    private fun setVolume(level: Int) {
-        val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        audio.setStreamVolume(
-            AudioManager.STREAM_MUSIC,
-            (level / 100.0 * max).toInt(),
-            0
-        )
-    }
-
-    private fun setBrightness(level: Int) {
-        Settings.System.putInt(
-            context.contentResolver,
-            Settings.System.SCREEN_BRIGHTNESS,
-            (level / 100.0 * 255).toInt()
-        )
-    }
-
-    private fun setDoNotDisturb(enabled: Boolean) {
-        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE)
-            as NotificationManager
-        nm.setInterruptionFilter(
-            if (enabled) NotificationManager.INTERRUPTION_FILTER_NONE
-            else NotificationManager.INTERRUPTION_FILTER_ALL
-        )
-    }
+override fun onNewIntent(intent: Intent) {
+  super.onNewIntent(intent)
+  if (intent.action == Intent.ACTION_ASSIST) {
+    // Notify Flutter side to activate listening
+    channel.invokeMethod("onAssistActivated", null)
+  }
 }
 ```
+
+**BootReceiver** — starts `VeroForegroundService` automatically after device reboot.
 
 ---
 
 ### 6.5 Assistant Brain
 
-The orchestrator that ties everything together:
+The orchestrator. Key changes from Phase 1:
+
+- Accepts `SkillRegistry` and executes multi-action responses
+- Loads persisted history from `MemoryStore` on construction
+- Saves new messages to `MemoryStore` after each turn
+- Uses `speakAndWait()` for proper status sync
+- Graceful error recovery: catches all exceptions, speaks a fallback phrase rather than showing a silent error
 
 ```dart
-// lib/core/assistant_brain.dart
+Future<AssistantResponse> process(String userInput) async {
+  _history.add(Message.user(userInput));
+  await _memoryStore.save(Message.user(userInput));
 
-class AssistantBrain {
-  final AssistantProvider provider;
-  final SkillRegistry skillRegistry;
-  final TtsService tts;
-  final List<Message> _history = [];
-
-  AssistantBrain({
-    required this.provider,
-    required this.skillRegistry,
-    required this.tts,
-  });
-
-  Future<AssistantResponse> process(String userInput) async {
-    // Add user message to history
-    _history.add(Message(role: 'user', content: userInput));
-
-    // Build system prompt dynamically with current skills
-    final systemPrompt = _buildSystemPrompt();
-
-    // Call AI provider
+  try {
     final response = await provider.send(
-      history: _history,
-      systemPrompt: systemPrompt,
+      history: _rolledHistory(),
+      systemPrompt: _buildSystemPrompt(),
     );
 
-    // Add assistant response to history
-    _history.add(Message(role: 'assistant', content: response.rawText));
+    _history.add(Message.assistant(response.rawText));
+    await _memoryStore.save(Message.assistant(response.rawText));
 
-    // Execute skill if present
-    if (response.skillId != null) {
-      final skill = skillRegistry.find(response.skillId!);
-      if (skill != null && response.skillArgs != null) {
-        await skill.execute(response.skillArgs!);
+    // Execute all actions in sequence
+    String? overrideSpeech;
+    for (final action in response.actions) {
+      final skill = skillRegistry?.find(action.skillId);
+      if (skill != null) {
+        final result = await skill.execute(action.args);
+        if (result.message != null) overrideSpeech = result.message;
       }
     }
 
-    // Speak the response
-    await tts.speak(response.speech);
-
+    await _tts.speakAndWait(overrideSpeech ?? response.speech);
     return response;
+
+  } catch (e) {
+    // Graceful spoken fallback
+    const fallback = "Sorry, I ran into a problem. Please try again.";
+    await _tts.speakAndWait(fallback);
+    rethrow; // let ChatNotifier show the error banner too
   }
-
-  String _buildSystemPrompt() => '''
-You are Vero, a helpful voice assistant running on Android.
-
-Always respond with a valid JSON object in this exact format:
-{
-  "speech": "what you say out loud (keep it concise and natural)",
-  "skill": "skill_id or null if no device action needed",
-  "args": { ...skill arguments } or null
-}
-
-Available skills:
-${skillRegistry.buildSkillManifest()}
-
-Guidelines:
-- Keep "speech" short and conversational
-- Confirm actions in "speech" (e.g., "Done, volume set to 50%")
-- For pure conversation, set "skill" and "args" to null
-- Never include markdown or extra formatting in your response
-- Always return valid JSON
-''';
-
-  void clearHistory() => _history.clear();
 }
 ```
+
+---
+
+### 6.6 Memory & Persistence
+
+Conversation history is persisted to a local SQLite database via `sqflite`. This enables Vero to remember context across app restarts.
+
+```dart
+// lib/core/memory/memory_store.dart
+
+class MemoryStore {
+  static const _dbName = 'vero_memory.db';
+  static const _tableName = 'messages';
+
+  Future<void> save(Message message) async { ... }
+  Future<List<Message>> loadRecent({int limit = 50}) async { ... }
+  Future<void> clear() async { ... }
+}
+```
+
+**Summarization strategy** (for long-term memory): when history exceeds `kMaxHistoryMessages`, older messages are summarized into a single system-injected context block rather than discarded. This preserves important facts (user's name, preferences, recurring tasks) without blowing the context window.
+
+The `AssistantBrain` loads the last N messages from `MemoryStore` on initialization, so every session begins with awareness of recent conversations.
+
+---
+
+### 6.7 Notification Reader
+
+Vero can read active notifications aloud via a `NotificationListenerService`. This requires the user to grant Notification Access in Android settings (guided in onboarding).
+
+`ReadNotificationsSkill` calls the Kotlin listener and formats the response:
+- "You have 3 notifications: 2 messages from WhatsApp and a Gmail from Sarah."
+- Optionally filters by app: "Read my WhatsApp messages"
+
+This is one of the key features that differentiates Vero from a pure chatbot.
+
+---
+
+### 6.8 Default Assistant Integration
+
+For Vero to respond to the Android home button long-press (like Google Assistant), two things are required:
+
+1. **User sets Vero as default digital assistant** in `Settings > Apps > Default Apps > Digital Assistant`. Onboarding guides users through this with a direct deep link.
+
+2. **MainActivity handles the ASSIST intent:**
+```kotlin
+// In MainActivity, declared in AndroidManifest:
+// <action android:name="android.intent.action.ASSIST" />
+// <category android:name="android.intent.category.DEFAULT" />
+```
+
+When activated via the home button, Vero immediately starts listening (skips wake word detection) and responds as normal.
 
 ---
 
@@ -653,166 +537,183 @@ Guidelines:
 | `FOREGROUND_SERVICE_MICROPHONE` | Mic access in foreground service (API 34+) | Declared in manifest |
 | `WRITE_SETTINGS` | Screen brightness control | Special intent flow |
 | `ACCESS_NOTIFICATION_POLICY` | Do Not Disturb control | Special intent flow |
+| `BIND_NOTIFICATION_LISTENER_SERVICE` | Read active notifications | Special intent flow |
 | `RECEIVE_BOOT_COMPLETED` | Auto-start after reboot | Declared in manifest |
 | `INTERNET` | AI API calls | Declared in manifest |
 | `VIBRATE` | Optional haptic feedback | Declared in manifest |
+| `POST_NOTIFICATIONS` | Foreground service notification (API 33+) | `permission_handler` |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Prevent OEM from killing service | Special intent flow |
 
-**Special permissions** (WRITE_SETTINGS, ACCESS_NOTIFICATION_POLICY) require the user to manually grant via the Settings app. Vero's onboarding flow should guide users through this step-by-step.
-
-**Battery optimization:** Android OEMs (especially Samsung and Xiaomi) aggressively kill background processes. Vero must prompt users to add it to the battery optimization allowlist during onboarding. Use the `IGNORE_BATTERY_OPTIMIZATIONS` intent.
+**Special permissions** require the user to manually grant via the Settings app. The onboarding permissions flow handles each one with an explanation card and a direct "Grant" button that opens the correct system screen.
 
 ---
 
 ## 8. The System Prompt Strategy
 
-The system prompt is the single most important configuration in the app. It determines whether the LLM acts like a real assistant or just a chatbot.
+The system prompt is the single most important configuration in the app.
 
-### Key principles:
+### Key principles
 
-**Force structured JSON output** — every response must be parseable. The brain catches any JSON parse errors and falls back to treating the raw text as speech only.
-
-**Dynamic skill manifest** — the system prompt is built at runtime by `SkillRegistry`, so new skills are automatically described to the AI without hardcoding.
-
-**Conversation memory** — the full `_history` array is sent with every request (up to the provider's context limit). This enables multi-turn commands like "set the volume to 30... actually make it 50."
-
-**Graceful degradation** — if the AI returns non-JSON (e.g., due to a provider hiccup), the brain catches the parse error and speaks the raw text instead of crashing.
-
-### Example interaction:
+**Multi-action JSON schema** — the LLM always returns an `actions` array, even for single commands or pure conversation:
 
 ```
-User:  "Hey Vero, turn the volume down to 20 and set brightness to max"
-
-Vero → Claude:
-[system prompt with skill manifest]
-[full conversation history]
-User: "turn the volume down to 20 and set brightness to max"
-
-Claude → Vero:
+Always respond with valid JSON:
 {
-  "speech": "Sure, volume set to 20 and brightness all the way up.",
-  "skill": "set_volume",
-  "args": { "level": 20 }
+  "speech": "what you say aloud (1–2 sentences, no markdown)",
+  "actions": [
+    { "skill": "skill_id", "args": { ...args } }
+  ]
 }
-
-// Note: multi-action support means we handle an array of skills in v2
+For conversation only, return "actions": [].
 ```
+
+**Dynamic skill manifest** — `SkillRegistry.buildSkillManifest()` generates the skills section at runtime, so new community skills are automatically described to the LLM without touching the prompt.
+
+**Memory context injection** — when summarized older history exists, it is injected as a system context block before the live conversation window:
+
+```
+[Context from previous sessions]
+The user's name is Deniz. They prefer volume at 40% and use Spotify for music.
+[End context]
+```
+
+**Graceful degradation** — `ResponseParser` handles malformed JSON with a 3-step fallback chain. If all parsing fails, the raw text is spoken rather than the app crashing.
+
+**Error recovery** — the brain catches all exceptions and speaks a fallback phrase before rethrowing, so the user always gets an audible response even on failure.
 
 ---
 
 ## 9. MVP Roadmap
 
-### Phase 1 — AI Core (Week 1–2)
-**Goal:** Working conversational loop with structured output
-
-- [ ] Project scaffold (Flutter + Kotlin shell)
-- [ ] `AssistantProvider` interface + `ClaudeProvider`
-- [ ] `OpenAIProvider` (identical structure, easy second provider)
-- [ ] `AssistantBrain` with history management
-- [ ] `TtsService` (speak responses)
-- [ ] Basic chat UI (message bubbles, input)
-- [ ] Settings screen (API key entry, provider selector)
-- [ ] JSON response parsing + error fallback
-
-**Deliverable:** Type a message, get a spoken AI response.
+### Phase 1 — AI Core ✅ Complete
+- Pluggable AI providers (Claude, OpenAI, Gemini, Ollama)
+- AssistantBrain with rolling history
+- Robust ResponseParser with fallback chain
+- TtsService + SttService
+- Chat UI with ThinkingBubble
+- Settings screen with secure API key storage
+- Dark theme
 
 ---
 
-### Phase 2 — Device Control (Week 2–3)
-**Goal:** Voice commands execute real device actions
+### Phase 2 — Full Featured Assistant (Current)
+**Goal:** Everything needed to be a daily-driver assistant
 
-- [ ] `VeroForegroundService.kt`
-- [ ] `DeviceControlChannel.kt` (volume, brightness, DND)
-- [ ] `VolumeSkill`, `BrightnessSkill`, `DoNotDisturbSkill`
-- [ ] `SkillRegistry` with dynamic system prompt generation
-- [ ] Permissions onboarding flow (WRITE_SETTINGS, RECORD_AUDIO)
-- [ ] STT integration (`SttService`)
-- [ ] Full loop: voice in → Claude → skill → TTS confirmation
+**Device Control**
+- [ ] Skill abstract class + SkillRegistry
+- [ ] VolumeSkill, BrightnessSkill, DoNotDisturbSkill
+- [ ] LaunchAppSkill with fuzzy app name resolution
+- [ ] DeviceControlChannel.kt + AppLauncherChannel.kt
+- [ ] VeroForegroundService.kt + BootReceiver.kt
+- [ ] Phase 2 permissions in AndroidManifest
 
-**Deliverable:** "Set volume to 30%" works end to end.
+**Multi-Action Commands**
+- [ ] Update `AssistantResponse` model to use `actions[]` array
+- [ ] Update `ResponseParser` for new schema
+- [ ] Update `AssistantBrain` to execute actions sequentially
+- [ ] Update system prompt to use new schema
+
+**Memory & Persistence**
+- [ ] `MemoryStore` (SQLite via sqflite)
+- [ ] Load recent history in `AssistantBrain` on init
+- [ ] Save messages after each turn
+- [ ] Conversation summarization for long-term context
+
+**Wake Word** (pulled forward from Phase 3)
+- [ ] Picovoice Porcupine integration
+- [ ] Wake word detection inside ForegroundService
+- [ ] Visual feedback on activation (waveform/pulse)
+
+**Notification Reading**
+- [ ] `VeroNotificationListener.kt`
+- [ ] `NotificationChannel.dart` wrapper
+- [ ] `ReadNotificationsSkill`
+- [ ] Notification Access permission in onboarding
+
+**Default Assistant Integration**
+- [ ] Handle `ACTION_ASSIST` intent in `MainActivity`
+- [ ] Onboarding step guiding user to set Vero as default assistant
+- [ ] Skip wake word when activated via home button long-press
+
+**Error Recovery**
+- [ ] `speakAndWait()` in TtsService
+- [ ] Fix ChatStatus sync (remove 300ms hack)
+- [ ] Spoken fallback on all failure paths in AssistantBrain
+
+**UI & Polish**
+- [ ] Light theme + theme switcher in settings
+- [ ] Mic button in ChatScreen with STT wiring
+- [ ] Model selector per provider in Settings
+- [ ] Onboarding screen (first run flow)
+- [ ] Permissions onboarding flow
+
+**Deliverable:** "Hey Vero, read my notifications, turn off DND, and open Spotify" works end to end.
 
 ---
 
-### Phase 3 — Wake Word (Week 3–4)
-**Goal:** Hands-free activation
-
-- [ ] Picovoice Porcupine integration (`picovoice_flutter`)
-- [ ] Wake word detection inside `ForegroundService`
-- [ ] Battery optimization onboarding (guide to allowlist)
-- [ ] Visual feedback when wake word detected (waveform/pulse animation)
-- [ ] OEM-specific battery exemption guidance (Samsung, Xiaomi, etc.)
-
-**Deliverable:** "Hey Vero" activates the assistant from any screen.
-
----
-
-### Phase 4 — App Launching + Polish (Week 4–5)
-**Goal:** Launch apps, interact with the Android ecosystem
-
-- [ ] `AppLauncherChannel.kt` (intent-based launching)
-- [ ] `LaunchAppSkill` with package name resolution
-- [ ] Installed app index (user can say "open Spotify" without knowing package names)
-- [ ] `GeminiProvider` implementation
-- [ ] `OllamaProvider` (local model support)
-- [ ] GitHub Actions CI pipeline
-- [ ] README, SKILL_GUIDE.md, PROVIDER_GUIDE.md
-- [ ] v0.1.0 GitHub release + APK
-
-**Deliverable:** Public open source release.
+### Phase 3 — Public Release
+- [ ] GitHub Actions CI (build + test on every PR)
+- [ ] SETUP.md developer guide
+- [ ] Demo GIF for README
+- [ ] F-Droid metadata
+- [ ] v0.1.0 tagged APK release
 
 ---
 
 ## 10. Known Limitations & Challenges
 
 ### Background Persistence
-Android's Doze mode and OEM battery optimizations are the #1 reliability issue. A `ForegroundService` with `START_STICKY` is necessary but not sufficient on all devices. The onboarding flow must walk users through manufacturer-specific battery settings.
+Android's Doze mode and OEM battery optimizations are the #1 reliability issue. `START_STICKY` + foreground service is necessary but not sufficient on Samsung/Xiaomi/OnePlus. The onboarding flow must walk users through manufacturer-specific battery settings.
 
-### Accessibility Service
-For advanced capabilities (reading screen content, simulating taps, interacting with other app UIs), an `AccessibilityService` is needed. There is no mature Flutter plugin for this — it requires a custom Kotlin implementation exposed via `MethodChannel`. Google Play is also stricter about approving apps that declare this permission, which can complicate distribution. For the open source / sideloaded audience, this is fine.
+### Notification Listener
+`NotificationListenerService` requires the user to grant access in a dedicated Android settings screen. It cannot be requested via `permission_handler`. The onboarding flow must deep-link directly to this screen.
 
-### Wake Word Accuracy
-Picovoice Porcupine is excellent but requires a custom wake word model for anything other than their built-in phrases. Custom models are free for open source use via their console.
+### Default Assistant
+The user must manually set Vero as the default digital assistant. This cannot be done programmatically. Onboarding provides a direct deep link to `Settings > Apps > Default Apps > Digital Assistant`.
+
+### Multi-Action Ordering
+Actions are executed sequentially. If one skill fails (e.g., app not installed), subsequent actions still run. The LLM's speech should only promise what is likely to succeed.
 
 ### Context Window Limits
-Sending the full conversation history with every request works well for short sessions but will hit token limits on long conversations. The `AssistantBrain` should implement a rolling window (keep the last N messages) or summarization strategy.
+The rolling window + summarization strategy handles short-to-medium sessions well. Very long sessions with complex state may still lose important context. This is an ongoing research area.
 
-### Multi-Action Commands
-The current MVP schema handles one skill per response. A natural command like "set volume to 30 and open Spotify" requires an array of skills. This is a v0.2 feature: change `skill`/`args` to `actions: [{skill, args}]`.
+### Notification Privacy
+Reading notifications gives Vero access to potentially sensitive content (messages, emails). This must be clearly communicated in onboarding, and notification data must never be sent to the LLM without user confirmation in a future privacy settings screen.
 
-### iOS
-iOS is significantly more locked down. Background microphone access, always-on processing, and system settings control are either restricted or unavailable. A potential iOS version would be a reduced-capability companion app, not a full assistant replacement.
+### Accessibility Service
+Not yet implemented. Required for reading screen content and simulating taps. High complexity, strict Play Store scrutiny. Planned for post-MVP.
 
 ### Play Store Distribution
-Apps using `RECORD_AUDIO` in a foreground service and `WRITE_SETTINGS` face additional Play Store scrutiny. For the initial release, distribution via GitHub (direct APK) and F-Droid is recommended. Play Store submission can follow once the permission story is clean.
+The combination of `RECORD_AUDIO` foreground service, `WRITE_SETTINGS`, and `BIND_NOTIFICATION_LISTENER_SERVICE` will require manual Play Store review. For v0.1.0, distribute via GitHub APK and F-Droid only.
 
 ---
 
 ## 11. Open Source Strategy
 
 ### License
-**Apache 2.0** — permissive enough for community adoption, compatible with commercial use, protects contributors.
+**Apache 2.0** — permissive for community adoption and commercial use, with explicit patent grant protection for contributors.
 
-### Repository Structure
+### Repository
+`github.com/DenizSAHIN570/vero`
+
 ```
-github.com/[org]/Vero
-├── Issues: feature requests, bug reports, skill ideas
+├── Issues:      feature requests, bug reports, skill ideas
 ├── Discussions: architecture decisions, provider support
-├── Projects: MVP board tracking phases 1–4
-└── Releases: tagged APK builds starting v0.1.0
+├── Projects:    Phase 2 task board
+└── Releases:    tagged APK builds from v0.1.0
 ```
 
-### Contribution Points
-The project is designed so contributors can participate at different levels:
+### Contribution Levels
+- **Skill authors** — implement `Skill`, open a PR. No native code required.
+- **Provider authors** — implement `AssistantProvider`. Pure Dart.
+- **Native contributors** — extend Kotlin channels with new device capabilities.
+- **Core contributors** — brain, memory, performance, battery optimization.
 
-- **Skill authors** — write a new `Skill` class following the guide, open a PR. No native code required.
-- **Provider authors** — implement `AssistantProvider` for a new AI backend. Pure Dart.
-- **Native contributors** — extend the Kotlin layer with new device control capabilities.
-- **Core contributors** — architecture, brain, performance, battery optimization.
-
-### Documentation Priority
-- `README.md` — quick start, demo GIF, provider setup
-- `SKILL_GUIDE.md` — how to write and contribute a skill
+### Documentation
+- `README.md` — quick start, demo, provider setup
+- `SKILL_GUIDE.md` — how to write a community skill
 - `PROVIDER_GUIDE.md` — how to add a new AI provider
-- `SETUP.md` — dev environment setup, Picovoice API key, first build
+- `SETUP.md` — dev environment setup (Phase 3)
 
 ---
 
@@ -820,20 +721,35 @@ The project is designed so contributors can participate at different levels:
 
 | Feature | Complexity | Notes |
 |---|---|---|
-| Multi-action commands | Low | Change response schema to `actions[]` array |
-| On-device LLM | Medium | ONNX Runtime or MediaPipe for fully offline mode |
-| Custom wake word UI | Medium | Picovoice console integration for user-trained models |
-| Accessibility service skills | High | Read screen, simulate taps — no plugin, pure Kotlin |
-| Conversation summarization | Medium | Prevent context window overflow on long sessions |
+| Accessibility service skills | High | Read screen, simulate taps — pure Kotlin |
+| On-device LLM | Medium | ONNX Runtime / MediaPipe for offline mode |
+| Custom wake word UI | Medium | Picovoice console + user-trained models |
 | Locale / language support | Medium | Multi-language STT + TTS + system prompt |
-| Tasker / Automation integration | Low | Expose intents that Tasker can trigger |
-| Plugin/APK skill loading | High | Dynamic skill loading from external APKs |
-| Widget | Low | Home screen widget for quick activation |
+| Notification reply | Medium | Reply to messages directly via Vero |
+| Tasker / Automation integration | Low | Expose intents for Tasker |
+| Dynamic skill loading (plugins) | High | Load skill APKs at runtime |
+| Home screen widget | Low | Quick activation without opening app |
 | Wear OS companion | High | Separate project, shared AI layer |
 | iOS companion app | High | Reduced capability, shared provider layer |
+| Conversation export | Low | Export chat history as markdown/JSON |
+| Voice profiles | Medium | Per-user voice recognition and preferences |
 
 ---
 
-*Document version: 0.1 — Living document, updated as architecture evolves.*
+## 13. Project Info
+
+| | |
+|---|---|
+| **Website** | veroassistant.com |
+| **Repository** | github.com/DenizSAHIN570/vero |
+| **Package ID** | com.veroassistant.app |
+| **Wake word** | "Hey Vero" |
+| **License** | Apache 2.0 |
+| **Min Android** | 8.0 (API 26) |
+| **Target Android** | 14 (API 34) |
+
+---
+
+*Document version: 0.3 — Living document, updated as architecture evolves.*
 *Last updated: February 2026*
 *Authors: Vero project contributors*
