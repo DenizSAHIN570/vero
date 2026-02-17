@@ -94,6 +94,7 @@ Vero is a **fully open source, privacy-respecting, LLM-powered voice assistant f
 | State management | `riverpod` |
 | Permissions | `permission_handler` |
 | Notifications | `flutter_local_notifications` |
+| URL launching ("Get API key" buttons) | `url_launcher` |
 
 ### Native Android Layer (Kotlin)
 
@@ -110,13 +111,20 @@ Vero is a **fully open source, privacy-respecting, LLM-powered voice assistant f
 
 ### AI Providers (Pluggable)
 
-| Provider | API |
-|---|---|
-| **Anthropic Claude** | `api.anthropic.com/v1/messages` |
-| **OpenAI GPT** | `api.openai.com/v1/chat/completions` |
-| **Google Gemini** | `generativelanguage.googleapis.com` |
-| **Ollama (local)** | `localhost:11434/api/chat` (self-hosted) |
-| **Custom / OpenAI-compatible** | User-supplied base URL |
+| Provider | Base URL | Key source | Notes |
+|---|---|---|---|
+| **Anthropic Claude** | `api.anthropic.com/v1/messages` | console.anthropic.com | Pay-per-token |
+| **OpenAI GPT** | `api.openai.com/v1/chat/completions` | platform.openai.com | Pay-per-token |
+| **Google Gemini** | `generativelanguage.googleapis.com` | aistudio.google.com | **Free tier available** |
+| **xAI Grok** | `api.x.ai/v1` | console.x.ai | OpenAI-compatible, very cheap |
+| **Kimi (Moonshot)** | `api.moonshot.ai/v1` | platform.moonshot.ai | OpenAI-compatible, very cheap |
+| **Z.ai (GLM)** | `api.z.ai/api/paas/v4` | z.ai | OpenAI-compatible, $3/mo flat tier |
+| **Ollama (local)** | `localhost:11434/api/chat` | None — self-hosted | **Completely free** |
+| **Custom / OpenAI-compatible** | User-supplied base URL | User-supplied | Bring your own |
+
+> ⚠️ **Subscriptions ≠ API access.** Claude Pro/Max, ChatGPT Plus/Pro, and Grok Premium+ are **consumer subscriptions** for using those companies' own chat apps. They are entirely separate products from the API and **cannot be used in Vero**. Every provider deliberately walls these off. A user must obtain a separate API key from the provider's developer console — this is billed per token, independent of any subscription they may hold.
+>
+> **Recommended free entry point:** Gemini (free API tier, no billing required) or Ollama (fully local).
 
 ### Dev Tooling
 
@@ -199,11 +207,18 @@ AssistantBrain
       ▼
 AssistantProvider (abstract interface)
       │
-      ├── ClaudeProvider
-      ├── OpenAIProvider
-      ├── GeminiProvider
-      └── OllamaProvider (local)
+      ├── ClaudeProvider              API key → console.anthropic.com
+      ├── OpenAIProvider              API key → platform.openai.com
+      ├── GeminiProvider              API key → aistudio.google.com (free tier)
+      ├── OpenAICompatibleProvider    (abstract base for OAI-compatible providers)
+      │     ├── GrokProvider          API key → console.x.ai
+      │     ├── KimiProvider          API key → platform.moonshot.ai
+      │     ├── ZaiProvider           API key → z.ai
+      │     └── CustomProvider        user-supplied base URL + key
+      └── OllamaProvider              local, no key
 ```
+
+Grok, Kimi, and Z.ai all use the OpenAI wire format. They extend a shared `OpenAICompatibleProvider` that accepts a configurable `baseUrl` and `defaultModel`, so adding new OpenAI-compatible providers in future requires only a few lines.
 
 ### Skill Abstraction
 
@@ -228,9 +243,14 @@ Vero/
 │   ├── core/
 │   │   ├── ai/
 │   │   │   ├── assistant_provider.dart        # abstract interface + models
-│   │   │   ├── claude_provider.dart
+│   │   │   ├── openai_compatible_provider.dart # shared base for OAI-wire providers
+│   │   │   ├── claude_provider.dart           # Anthropic native format
 │   │   │   ├── openai_provider.dart
 │   │   │   ├── gemini_provider.dart
+│   │   │   ├── grok_provider.dart             # extends OpenAICompatibleProvider
+│   │   │   ├── kimi_provider.dart             # extends OpenAICompatibleProvider
+│   │   │   ├── zai_provider.dart              # extends OpenAICompatibleProvider
+│   │   │   ├── custom_provider.dart           # extends OpenAICompatibleProvider
 │   │   │   ├── ollama_provider.dart
 │   │   │   ├── provider_registry.dart
 │   │   │   └── response_parser.dart
@@ -316,7 +336,58 @@ Vero/
 
 ### 6.1 AI Provider Layer
 
-The provider interface is the foundation of Vero's pluggability. Every AI backend implements the same contract. See existing `lib/core/ai/` files for full implementations.
+The provider interface is the foundation of Vero's pluggability. Every AI backend implements the same contract.
+
+**Auth model — API keys only.** All providers require an API key from their developer console. Consumer subscriptions (Claude Pro, ChatGPT Plus, Grok Premium+, etc.) are completely separate products and **cannot be used here** — this is each provider's deliberate policy, not a Vero limitation. The Settings screen shows a "Get API key →" deep link for each provider so users can obtain one in one tap.
+
+Grok, Kimi, and Z.ai all speak the OpenAI wire format, so they share a base class:
+
+```dart
+// lib/core/ai/openai_compatible_provider.dart
+abstract class OpenAICompatibleProvider implements AssistantProvider {
+  final String apiKey;
+  final String baseUrl;
+  final String defaultModel;
+  // ... shared send() / stream() implementation using OpenAI format
+}
+
+// Three lines to add a new compatible provider:
+class GrokProvider extends OpenAICompatibleProvider {
+  GrokProvider({required String apiKey}) : super(
+    apiKey: apiKey,
+    baseUrl: 'https://api.x.ai/v1',
+    defaultModel: 'grok-4-fast',
+  );
+}
+
+class KimiProvider extends OpenAICompatibleProvider {
+  KimiProvider({required String apiKey}) : super(
+    apiKey: apiKey,
+    baseUrl: 'https://api.moonshot.ai/v1',
+    defaultModel: 'kimi-latest',
+  );
+}
+
+class ZaiProvider extends OpenAICompatibleProvider {
+  ZaiProvider({required String apiKey}) : super(
+    apiKey: apiKey,
+    baseUrl: 'https://api.z.ai/api/paas/v4',
+    defaultModel: 'glm-4-plus',
+  );
+}
+```
+
+**Provider key setup links** ("Get API key →" buttons in Settings):
+
+| Provider | URL | Free tier? |
+|---|---|---|
+| Claude | console.anthropic.com/settings/keys | No |
+| OpenAI | platform.openai.com/api-keys | No |
+| Gemini | aistudio.google.com/apikey | **Yes** |
+| Grok | console.x.ai | No |
+| Kimi | platform.moonshot.ai | No (min $1 credit) |
+| Z.ai | z.ai/subscribe | $3/mo flat or PAYG |
+| Ollama | — (local) | **Free** |
 
 ```dart
 abstract class AssistantProvider {
